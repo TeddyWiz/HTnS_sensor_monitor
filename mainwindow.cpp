@@ -22,6 +22,12 @@
 #include <QCloseEvent>
 #include <QScrollBar>
 #include <QStatusBar>
+#include <QScrollBar>
+#include <QToolButton>
+#include <QTextCursor>
+#include <QTextCharFormat>
+#include <QTextBlock>
+#include <QTextDocument>
 #include <cmath>
 
 namespace {
@@ -57,6 +63,13 @@ const char *kCmdTerminator   = "\r\n";
 // 표시/저장 소수점 자리수
 constexpr int kDisplayDecimals = 3;   // 화면의 "현재 Meter 값"
 constexpr int kCsvDecimals     = 4;   // CSV 의 Meter값(변환)
+
+// Debug 파싱 값의 단위.
+//  Debug 로그에서 읽은 숫자는 uA(마이크로암페어) 이므로,
+//  Meter 값과 같은 기준 단위(A)로 바꿔서 그래프에 그린다. (1 uA = 1e-6 A)
+const char  *kDebugUnitName  = "uA";   // Debug 로그에 찍히는 값의 단위
+const char  *kDebugBaseUnit  = "A";    // 환산 후 기준 단위
+constexpr double kDebugUnitScale = 1e-6;
 
 QString nowStamp()
 {
@@ -263,11 +276,35 @@ void MainWindow::buildUi()
         "font-size:20px;font-weight:bold;color:#212529;}"));
 
     m_graph = new GraphWidget(central);
+    m_graph->setDebugLabel(QStringLiteral("Debug (") + QString::fromLatin1(kDebugUnitName) + QLatin1Char(')'));
+
+    // 지나간 구간을 확인할 수 있는 가로 스크롤
+    m_graphScroll = new QScrollBar(Qt::Horizontal, central);
+    m_graphScroll->setRange(0, 0);
+    m_graphScroll->setEnabled(false);
+
+    m_btnGraphLatest = new QToolButton(central);
+    m_btnGraphLatest->setText(QStringLiteral("최신 ▶|"));
+    m_btnGraphLatest->setToolTip(QStringLiteral("최신 구간으로 이동하고 계속 따라갑니다."));
+
+    m_lblGraphRange = new QLabel(central);
+    m_lblGraphRange->setMinimumWidth(150);
+    m_lblGraphRange->setAlignment(Qt::AlignCenter);
+    m_lblGraphRange->setStyleSheet(QStringLiteral("QLabel{color:#5A6470;}"));
+
+    QHBoxLayout *scrollLay = new QHBoxLayout;
+    scrollLay->setContentsMargins(0, 0, 0, 0);
+    scrollLay->setSpacing(6);
+    scrollLay->addWidget(m_graphScroll, 1);
+    scrollLay->addWidget(m_lblGraphRange);
+    scrollLay->addWidget(m_btnGraphLatest);
 
     QGroupBox *gbGraph = new QGroupBox(QStringLiteral("그래프 표시"), central);
     QVBoxLayout *gl = new QVBoxLayout(gbGraph);
     gl->setContentsMargins(6, 6, 6, 6);
-    gl->addWidget(m_graph);
+    gl->setSpacing(4);
+    gl->addWidget(m_graph, 1);
+    gl->addLayout(scrollLay);
 
     QWidget *rightPane = new QWidget(central);
     QVBoxLayout *rightLay = new QVBoxLayout(rightPane);
@@ -295,6 +332,13 @@ void MainWindow::buildUi()
     connect(m_btnDebugGraph, &QPushButton::clicked, this, &MainWindow::onDebugGraphToggleClicked);
     connect(m_btnStart,      &QPushButton::clicked, this, &MainWindow::onStartClicked);
     connect(m_edDebugCmd,    &QLineEdit::returnPressed, this, &MainWindow::onDebugCommandEntered);
+    connect(m_graphScroll,   &QScrollBar::valueChanged, this, &MainWindow::onGraphScrolled);
+    connect(m_graph,         &GraphWidget::viewChanged, this, &MainWindow::onGraphViewChanged);
+    connect(m_btnGraphLatest, &QToolButton::clicked, this, [this]() {
+        m_graph->setFollowLatest(true);
+    });
+
+    onGraphViewChanged();
 }
 
 // ================================================================= 시리얼 연결
@@ -434,16 +478,189 @@ void MainWindow::onDebugGraphToggleClicked()
     m_graph->setDebugVisible(m_debugGraphOn);
 }
 
+// ================================================================= 그래프 스크롤
+
+void MainWindow::onGraphScrolled(int value)
+{
+    if (m_scrollSyncing)
+        return;
+
+    // 스크롤바 단위는 0.1 초
+    m_graph->setViewStart(m_graph->firstTime() + value / 10.0);
+}
+
+void MainWindow::onGraphViewChanged()
+{
+    if (!m_graphScroll)
+        return;
+
+    const double first = m_graph->firstTime();
+    const double last  = m_graph->lastTime();
+    const double win   = m_graph->windowSeconds();
+    const double span  = qMax(0.0, (last - first) - win);   // 스크롤 가능한 길이(초)
+
+    m_scrollSyncing = true;
+    m_graphScroll->setRange(0, qRound(span * 10.0));
+    m_graphScroll->setPageStep(qMax(1, qRound(win * 10.0)));
+    m_graphScroll->setSingleStep(qMax(1, qRound(win * 1.0)));   // 보이는 구간의 약 10%
+    m_graphScroll->setEnabled(span > 0.0);
+    m_graphScroll->setValue(m_graph->followLatest()
+                            ? m_graphScroll->maximum()
+                            : qRound((m_graph->viewStart() - first) * 10.0));
+    m_scrollSyncing = false;
+
+    const double vs = m_graph->viewStart();
+    m_lblGraphRange->setText(QStringLiteral("%1 ~ %2 s%3")
+                             .arg(vs, 0, 'f', 1)
+                             .arg(vs + win, 0, 'f', 1)
+                             .arg(m_graph->followLatest() ? QString() : QStringLiteral("  (정지)")));
+
+    m_btnGraphLatest->setEnabled(!m_graph->followLatest());
+}
+
 // ================================================================= 로그 출력
 
-void MainWindow::appendDebugLog(const QString &text)
+// ---------------------------------------------------------------- ANSI (Tera Term 스타일)
+namespace {
+// Tera Term 기본 팔레트 (0~7 일반, 8~15 밝은색)
+const QColor kAnsiColors[16] = {
+    QColor(  0,   0,   0), QColor(255,   0,   0), QColor(  0, 255,   0), QColor(255, 255,   0),
+    QColor(128, 128, 255), QColor(255,   0, 255), QColor(  0, 255, 255), QColor(255, 255, 255),
+    QColor(128, 128, 128), QColor(255,  96,  96), QColor(128, 255, 128), QColor(255, 255, 128),
+    QColor(160, 160, 255), QColor(255, 128, 255), QColor(128, 255, 255), QColor(255, 255, 255)
+};
+
+QColor ansi256(int n)
 {
-    m_txtDebug->appendPlainText(text);
+    if (n < 0 || n > 255) return QColor();
+    if (n < 16) return kAnsiColors[n];
+    if (n >= 232) { const int g = 8 + (n - 232) * 10; return QColor(g, g, g); }
+    n -= 16;
+    auto lv = [](int v) { return v == 0 ? 0 : 55 + v * 40; };
+    return QColor(lv(n / 36), lv((n / 6) % 6), lv(n % 6));
+}
+
+const QColor kTimeStampColor(140, 140, 140);   // 타임스탬프는 회색
+} // namespace
+
+QString MainWindow::stripAnsi(const QString &s)
+{
+    static const QRegularExpression re(
+        QStringLiteral("\\x1B(?:\\[[0-9;?]*[@-~]|[()][0-9A-Za-z]|[@-Z\\\\-_]?)"));
+    QString out = s;
+    out.remove(re);
+    return out;
+}
+
+void MainWindow::applySgr(const QString &params)
+{
+    const QStringList p = params.isEmpty() ? QStringList{QStringLiteral("0")}
+                                           : params.split(QLatin1Char(';'));
+    for (int i = 0; i < p.size(); ++i) {
+        const int v = p.at(i).isEmpty() ? 0 : p.at(i).toInt();
+        if (v == 0) {
+            m_ansiFg = QColor(); m_ansiBg = QColor(); m_ansiFgIdx = -1;
+            m_ansiBold = m_ansiUnderline = m_ansiReverse = false;
+        }
+        else if (v == 1)  m_ansiBold = true;
+        else if (v == 22) m_ansiBold = false;
+        else if (v == 4)  m_ansiUnderline = true;
+        else if (v == 24) m_ansiUnderline = false;
+        else if (v == 7)  m_ansiReverse = true;
+        else if (v == 27) m_ansiReverse = false;
+        else if (v >= 30 && v <= 37)  { m_ansiFgIdx = v - 30; m_ansiFg = kAnsiColors[v - 30]; }
+        else if (v == 39)             { m_ansiFgIdx = -1; m_ansiFg = QColor(); }
+        else if (v >= 90 && v <= 97)  { m_ansiFgIdx = -1; m_ansiFg = kAnsiColors[v - 90 + 8]; }
+        else if (v >= 40 && v <= 47)  m_ansiBg = kAnsiColors[v - 40];
+        else if (v == 49)             m_ansiBg = QColor();
+        else if (v >= 100 && v <= 107) m_ansiBg = kAnsiColors[v - 100 + 8];
+        else if ((v == 38 || v == 48) && i + 1 < p.size()) {
+            QColor col;
+            const int mode = p.at(i + 1).toInt();
+            if (mode == 5 && i + 2 < p.size()) { col = ansi256(p.at(i + 2).toInt()); i += 2; }
+            else if (mode == 2 && i + 4 < p.size()) {
+                col = QColor(p.at(i + 2).toInt(), p.at(i + 3).toInt(), p.at(i + 4).toInt());
+                i += 4;
+            } else { i += 1; }
+            if (v == 38) { m_ansiFgIdx = -1; m_ansiFg = col; }
+            else         { m_ansiBg = col; }
+        }
+    }
+}
+
+void MainWindow::appendDebugAnsi(const QString &prefix, const QString &line)
+{
+    QTextDocument *doc = m_txtDebug->document();
+    QTextCursor cur(doc);
+    cur.movePosition(QTextCursor::End);
+    if (!doc->isEmpty() || doc->blockCount() > 1 || !doc->firstBlock().text().isEmpty())
+        cur.insertBlock(QTextBlockFormat(), QTextCharFormat());
+
+    // 타임스탬프 등 앞부분은 기본(회색) 서식
+    if (!prefix.isEmpty()) {
+        QTextCharFormat pf;
+        pf.setForeground(kTimeStampColor);
+        cur.insertText(prefix, pf);
+    }
+
+    auto currentFormat = [this]() {
+        QTextCharFormat f;
+        QColor fg = m_ansiFg;
+        if (m_ansiBold && m_ansiFgIdx >= 0) fg = kAnsiColors[m_ansiFgIdx + 8];   // bold -> 밝은색
+        QColor bg = m_ansiBg;
+        if (m_ansiReverse) {
+            QColor defFg = m_txtDebug->palette().color(QPalette::Text);
+            QColor defBg = m_txtDebug->palette().color(QPalette::Base);
+            QColor nf = bg.isValid() ? bg : defBg;
+            QColor nb = fg.isValid() ? fg : defFg;
+            fg = nf; bg = nb;
+        }
+        if (fg.isValid()) f.setForeground(fg);
+        if (bg.isValid()) f.setBackground(bg);
+        if (m_ansiBold)      f.setFontWeight(QFont::Bold);
+        if (m_ansiUnderline) f.setFontUnderline(true);
+        return f;
+    };
+
+    static const QRegularExpression reEsc(
+        QStringLiteral("\\x1B(?:\\[([0-9;?]*)([@-~])|[()][0-9A-Za-z]|[@-Z\\\\-_]?)"));
+    int pos = 0;
+    QRegularExpressionMatchIterator it = reEsc.globalMatch(line);
+    while (it.hasNext()) {
+        const QRegularExpressionMatch m = it.next();
+        if (m.capturedStart() > pos)
+            cur.insertText(line.mid(pos, m.capturedStart() - pos), currentFormat());
+        if (m.captured(2) == QLatin1String("m"))
+            applySgr(m.captured(1));
+        // 그 외 제어 시퀀스(커서 이동, 화면 지우기 등)는 무시
+        pos = m.capturedEnd();
+    }
+    if (pos < line.size())
+        cur.insertText(line.mid(pos), currentFormat());
+
     m_txtDebug->verticalScrollBar()->setValue(m_txtDebug->verticalScrollBar()->maximum());
 
     if (m_txtFile.isOpen()) {
         m_txtStream << QDateTime::currentDateTime().toString(QStringLiteral("yyyy-MM-dd HH:mm:ss.zzz"))
-                    << QStringLiteral("\t") << text << QStringLiteral("\n");
+                    << QStringLiteral("\t") << prefix << stripAnsi(line) << QStringLiteral("\n");
+        m_txtStream.flush();
+    }
+}
+
+void MainWindow::appendDebugLog(const QString &text)
+{
+    // 프로그램 내부 메시지는 ANSI 상태에 영향을 주지 않고 기본색으로 출력
+    QTextDocument *doc = m_txtDebug->document();
+    QTextCursor cur(doc);
+    cur.movePosition(QTextCursor::End);
+    if (!doc->isEmpty() || doc->blockCount() > 1 || !doc->firstBlock().text().isEmpty())
+        cur.insertBlock(QTextBlockFormat(), QTextCharFormat());
+    cur.insertText(stripAnsi(text), QTextCharFormat());
+    m_txtDebug->verticalScrollBar()->setValue(m_txtDebug->verticalScrollBar()->maximum());
+
+    if (m_txtFile.isOpen()) {
+        m_txtStream << QDateTime::currentDateTime().toString(QStringLiteral("yyyy-MM-dd HH:mm:ss.zzz"))
+                    << QStringLiteral("\t") << stripAnsi(text) << QStringLiteral("\n");
         m_txtStream.flush();
     }
 }
@@ -529,21 +746,22 @@ double MainWindow::parseNumberAfterKeyword(const QString &line, const QString &k
 
 void MainWindow::processDebugLine(const QString &line)
 {
-    appendDebugLog(QStringLiteral("[%1] %2").arg(timeStamp(), line));
+    appendDebugAnsi(QStringLiteral("[%1] ").arg(timeStamp()), line);
 
     if (m_parseKeyword.isEmpty())
         return;
 
     bool ok = false;
-    const double v = parseNumberAfterKeyword(line, m_parseKeyword, &ok);
+    const double v = parseNumberAfterKeyword(stripAnsi(line), m_parseKeyword, &ok);
     if (!ok)
         return;
 
     m_hasDebugValue  = true;
-    m_lastDebugValue = v;
+    m_lastDebugValue = v;                       // 파싱한 원래 값 (uA)
 
+    // 그래프에는 Meter 값과 같은 기준 단위로 환산해서 그린다.
     if (m_debugGraphOn && m_running && m_elapsed.isValid())
-        m_graph->addDebugPoint(m_elapsed.elapsed() / 1000.0, v);
+        m_graph->addDebugPoint(m_elapsed.elapsed() / 1000.0, v * kDebugUnitScale);
 }
 
 void MainWindow::processMeterLine(const QString &line)
@@ -669,7 +887,10 @@ bool MainWindow::openLogFiles()
     m_csvStream.setDevice(&m_csvFile);
     m_csvStream.setEncoding(QStringConverter::Utf8);
     m_csvStream.setGenerateByteOrderMark(true);      // Excel 한글 깨짐 방지
-    m_csvStream << QStringLiteral("시간,경과시간(s),Meter값(기본단위),Meter값(변환),단위,Debug값\n");
+    m_csvStream << QStringLiteral("시간,경과시간(s),"
+                                  "Meter값(기본단위),Meter값(변환),단위,"
+                                  "Debug값(%1),Debug값(기본단위),Debug값(변환),Debug단위\n")
+                   .arg(QString::fromLatin1(kDebugUnitName));
     m_csvStream.flush();
 
     statusBar()->showMessage(QStringLiteral("저장 : %1 , %2")
@@ -690,16 +911,25 @@ void MainWindow::writeCsvRow(const QDateTime &ts, double elapsed, double meterVa
     if (!m_csvFile.isOpen())
         return;
 
-    QString dbg;
-    if (m_debugGraphOn && m_hasDebugValue)          // 그래프 표시가 ON 일 때만 함께 저장
-        dbg = csvNumber(m_lastDebugValue);
+    // Debug 값 : 원본(uA) / 기준 단위 환산값(A) / 단위 변환값 + 단위
+    QString dbgRaw, dbgBase, dbgConv, dbgUnit;
+    if (m_debugGraphOn && m_hasDebugValue) {         // 그래프 표시가 ON 일 때만 함께 저장
+        const double base = m_lastDebugValue * kDebugUnitScale;
+        dbgRaw  = csvNumber(m_lastDebugValue);
+        dbgBase = csvNumber(base);
+        UnitUtil::splitValue(base, kCsvDecimals, dbgConv, dbgUnit);
+        dbgUnit += QString::fromLatin1(kDebugBaseUnit);
+    }
 
     m_csvStream << ts.toString(QStringLiteral("yyyy-MM-dd HH:mm:ss.zzz")) << QLatin1Char(',')
                 << QString::number(elapsed, 'f', 3)                       << QLatin1Char(',')
                 << csvNumber(meterValue)                                  << QLatin1Char(',')
                 << meterConverted                                         << QLatin1Char(',')
                 << meterUnit                                              << QLatin1Char(',')
-                << dbg << QLatin1Char('\n');
+                << dbgRaw                                                 << QLatin1Char(',')
+                << dbgBase                                                << QLatin1Char(',')
+                << dbgConv                                                << QLatin1Char(',')
+                << dbgUnit << QLatin1Char('\n');
     m_csvStream.flush();
 }
 

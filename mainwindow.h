@@ -6,6 +6,7 @@
 #include <QFile>
 #include <QTextStream>
 #include <QRegularExpression>
+#include <QColor>
 
 #include "serialsettingsdialog.h"
 
@@ -14,6 +15,8 @@ class QLabel;
 class QPlainTextEdit;
 class QLineEdit;
 class QSpinBox;
+class QScrollBar;
+class QToolButton;
 class QSerialPort;
 class QTimer;
 class GraphWidget;
@@ -46,6 +49,9 @@ private slots:
     void onDebugPortError(QSerialPort::SerialPortError err);
     void onMeterPortError(QSerialPort::SerialPortError err);
 
+    void onGraphScrolled(int value);     // 스크롤바 -> 그래프 구간 이동
+    void onGraphViewChanged();           // 그래프 -> 스크롤바 상태 갱신
+
 private:
     enum class MeterState { Idle, WaitIdn, Polling };
 
@@ -69,6 +75,9 @@ private:
 
     // 로그 / 파일
     void appendDebugLog(const QString &text);
+    void appendDebugAnsi(const QString &prefix, const QString &line);   // ANSI 색상 해석
+    void applySgr(const QString &params);
+    static QString stripAnsi(const QString &s);
     void appendMeterLog(const QString &text);
     bool openLogFiles();
     void closeLogFiles();
@@ -100,6 +109,10 @@ private:
     QLineEdit      *m_edDebugCmd     = nullptr;
     QLabel         *m_lblMeterValue  = nullptr;
     GraphWidget    *m_graph          = nullptr;
+    QScrollBar     *m_graphScroll    = nullptr;   // 그래프 가로 스크롤
+    QToolButton    *m_btnGraphLatest = nullptr;   // 최신 구간으로 이동
+    QLabel         *m_lblGraphRange  = nullptr;   // 보이는 구간 표시
+    bool            m_scrollSyncing  = false;
 
     // ---------------- 시리얼 ----------------
     QSerialPort    *m_debugPort      = nullptr;
@@ -133,6 +146,14 @@ private:
     QString         m_logDir;
 
     QRegularExpression m_reNumber;
+
+    // ---------------- ANSI 색상 상태 (Tera Term 방식, 줄 간 유지) ----------------
+    QColor          m_ansiFg;                 // invalid = 기본색
+    QColor          m_ansiBg;
+    int             m_ansiFgIdx      = -1;    // 0~7 : bold 시 밝은색으로 전환
+    bool            m_ansiBold       = false;
+    bool            m_ansiUnderline  = false;
+    bool            m_ansiReverse    = false;
 };
 
 #endif // MAINWINDOW_H
