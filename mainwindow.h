@@ -17,6 +17,7 @@ class QLineEdit;
 class QSpinBox;
 class QScrollBar;
 class QToolButton;
+class QComboBox;
 class QSerialPort;
 class QTimer;
 class GraphWidget;
@@ -51,11 +52,20 @@ private slots:
 
     void onGraphScrolled(int value);     // 스크롤바 -> 그래프 구간 이동
     void onGraphViewChanged();           // 그래프 -> 스크롤바 상태 갱신
+    void onMeterUnitChanged(int index);  // 측정 종류 (전류 A / 전압 V) 변경
+    void onDebugUnitChanged(int index);  // Debug 값 단위 변경
 
 private:
     enum class MeterState { Idle, WaitIdn, Polling };
 
     void buildUi();
+
+    // 단위
+    QString meterBaseUnit() const;       // "A" 또는 "V"
+    QString debugUnitName() const;       // 예) "uA", "mV"
+    double  debugUnitScale() const;      // Debug 값 -> 기본 단위 배율 (uA -> 1e-6)
+    void    fillDebugUnitCombo();
+    void    applyUnitLabels();
 
     // 시리얼
     void toggleConnection(QSerialPort *port,
@@ -108,6 +118,8 @@ private:
     QPlainTextEdit *m_txtMeter       = nullptr;
     QLineEdit      *m_edDebugCmd     = nullptr;
     QLabel         *m_lblMeterValue  = nullptr;
+    QComboBox      *m_cbMeterUnit    = nullptr;   // 전류(A) / 전압(V)
+    QComboBox      *m_cbDebugUnit    = nullptr;   // Debug 값 단위 (u/m/기본)
     GraphWidget    *m_graph          = nullptr;
     QScrollBar     *m_graphScroll    = nullptr;   // 그래프 가로 스크롤
     QToolButton    *m_btnGraphLatest = nullptr;   // 최신 구간으로 이동

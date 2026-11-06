@@ -63,6 +63,18 @@ void GraphWidget::setDebugLabel(const QString &label)
     update();
 }
 
+void GraphWidget::setMeterLabel(const QString &label)
+{
+    m_meterLabel = label;
+    update();
+}
+
+void GraphWidget::setYUnit(const QString &unit)
+{
+    m_yUnit = unit;
+    update();
+}
+
 void GraphWidget::setWindowSeconds(double sec)
 {
     if (sec > 1.0) {
@@ -323,7 +335,8 @@ void GraphWidget::paintEvent(QPaintEvent *event)
             p.drawLine(plot.left(), y, plot.right(), y);
 
             QString s = QString::number(v / yFactor, 'f', yDecimals);
-            if (!yPrefix.isEmpty()) s += QLatin1Char(' ') + yPrefix;
+            if (!yPrefix.isEmpty() || !m_yUnit.isEmpty())
+                s += QLatin1Char(' ') + yPrefix + m_yUnit;
 
             p.setPen(QColor(0x44, 0x4A, 0x50));
             p.drawText(QRect(0, y - 9, kMarginLeft - 6, 18),
@@ -376,7 +389,7 @@ void GraphWidget::paintEvent(QPaintEvent *event)
     p.setBrush(kMeterColor);
     p.drawRect(lx, ly, 14, 3);
     p.setPen(QColor(0x33, 0x33, 0x33));
-    p.drawText(lx + 20, ly + 6, QStringLiteral("Meter"));
+    p.drawText(lx + 20, ly + 6, m_meterLabel);
 
     if (m_debugVisible) {
         ly += 16;

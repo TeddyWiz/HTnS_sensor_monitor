@@ -24,6 +24,7 @@
 #include <QStatusBar>
 #include <QScrollBar>
 #include <QToolButton>
+#include <QComboBox>
 #include <QTextCursor>
 #include <QTextCharFormat>
 #include <QTextBlock>
@@ -64,12 +65,13 @@ const char *kCmdTerminator   = "\r\n";
 constexpr int kDisplayDecimals = 3;   // 화면의 "현재 Meter 값"
 constexpr int kCsvDecimals     = 4;   // CSV 의 Meter값(변환)
 
-// Debug 파싱 값의 단위.
-//  Debug 로그에서 읽은 숫자는 uA(마이크로암페어) 이므로,
-//  Meter 값과 같은 기준 단위(A)로 바꿔서 그래프에 그린다. (1 uA = 1e-6 A)
-const char  *kDebugUnitName  = "uA";   // Debug 로그에 찍히는 값의 단위
-const char  *kDebugBaseUnit  = "A";    // 환산 후 기준 단위
-constexpr double kDebugUnitScale = 1e-6;
+// 측정 단위
+//  Meter 측정 종류 : 전류(A) / 전압(V) 를 화면에서 선택한다.
+//  Debug 파싱 값은 선택한 접두어(u / m / 없음) 단위로 찍힌다고 보고,
+//  Meter 값과 같은 기본 단위(A 또는 V)로 환산해서 그래프에 그린다. (1 uA = 1e-6 A)
+const char  *kDebugPrefixName[]  = { "u",  "m",  ""  };
+constexpr double kDebugPrefixScale[] = { 1e-6, 1e-3, 1.0 };
+constexpr int kDebugPrefixCount  = 3;
 
 QString nowStamp()
 {
@@ -275,8 +277,30 @@ void MainWindow::buildUi()
         "QLabel{background:#F8F9FA;border:1px solid #ADB5BD;border-radius:4px;"
         "font-size:20px;font-weight:bold;color:#212529;}"));
 
+    // 단위 선택 : Meter 측정 종류(전류 A / 전압 V) + Debug 값 단위
+    m_cbMeterUnit = new QComboBox(central);
+    m_cbMeterUnit->addItem(QStringLiteral("전류 (A)"), QStringLiteral("A"));
+    m_cbMeterUnit->addItem(QStringLiteral("전압 (V)"), QStringLiteral("V"));
+    m_cbMeterUnit->setToolTip(QStringLiteral("Meter 값과 그래프에 표시할 단위를 선택합니다.\n"
+                                             "(Meter 장비의 측정 기능도 같은 종류로 설정하세요)"));
+
+    m_cbDebugUnit = new QComboBox(central);
+    m_cbDebugUnit->setToolTip(QStringLiteral("Debug 로그에서 파싱한 숫자의 단위를 선택합니다."));
+
+    QLabel *lblMeterUnit = new QLabel(QStringLiteral("Meter 단위"), central);
+    QLabel *lblDebugUnit = new QLabel(QStringLiteral("Debug 단위"), central);
+
+    QHBoxLayout *unitLay = new QHBoxLayout;
+    unitLay->setContentsMargins(0, 0, 0, 0);
+    unitLay->setSpacing(6);
+    unitLay->addWidget(lblMeterUnit);
+    unitLay->addWidget(m_cbMeterUnit);
+    unitLay->addSpacing(16);
+    unitLay->addWidget(lblDebugUnit);
+    unitLay->addWidget(m_cbDebugUnit);
+    unitLay->addStretch(1);
+
     m_graph = new GraphWidget(central);
-    m_graph->setDebugLabel(QStringLiteral("Debug (") + QString::fromLatin1(kDebugUnitName) + QLatin1Char(')'));
 
     // 지나간 구간을 확인할 수 있는 가로 스크롤
     m_graphScroll = new QScrollBar(Qt::Horizontal, central);
@@ -310,6 +334,7 @@ void MainWindow::buildUi()
     QVBoxLayout *rightLay = new QVBoxLayout(rightPane);
     rightLay->setContentsMargins(0, 0, 0, 0);
     rightLay->setSpacing(6);
+    rightLay->addLayout(unitLay);
     rightLay->addWidget(m_lblMeterValue);
     rightLay->addWidget(gbGraph, 1);
 
@@ -338,7 +363,70 @@ void MainWindow::buildUi()
         m_graph->setFollowLatest(true);
     });
 
+    connect(m_cbMeterUnit, QOverload<int>::of(&QComboBox::currentIndexChanged),
+            this, &MainWindow::onMeterUnitChanged);
+    connect(m_cbDebugUnit, QOverload<int>::of(&QComboBox::currentIndexChanged),
+            this, &MainWindow::onDebugUnitChanged);
+
+    fillDebugUnitCombo();
+    applyUnitLabels();
     onGraphViewChanged();
+}
+
+// ================================================================= 단위 선택
+
+QString MainWindow::meterBaseUnit() const
+{
+    return m_cbMeterUnit ? m_cbMeterUnit->currentData().toString() : QStringLiteral("A");
+}
+
+QString MainWindow::debugUnitName() const
+{
+    int i = m_cbDebugUnit ? m_cbDebugUnit->currentIndex() : 0;
+    if (i < 0 || i >= kDebugPrefixCount) i = 0;
+    return QString::fromLatin1(kDebugPrefixName[i]) + meterBaseUnit();
+}
+
+double MainWindow::debugUnitScale() const
+{
+    int i = m_cbDebugUnit ? m_cbDebugUnit->currentIndex() : 0;
+    if (i < 0 || i >= kDebugPrefixCount) i = 0;
+    return kDebugPrefixScale[i];
+}
+
+void MainWindow::fillDebugUnitCombo()
+{
+    // 측정 종류가 바뀌어도 선택한 접두어(u / m / 없음)는 그대로 유지
+    const int keep = m_cbDebugUnit->count() > 0 ? m_cbDebugUnit->currentIndex() : 0;
+    const QString base = meterBaseUnit();
+
+    QSignalBlocker block(m_cbDebugUnit);
+    m_cbDebugUnit->clear();
+    for (int i = 0; i < kDebugPrefixCount; ++i)
+        m_cbDebugUnit->addItem(QString::fromLatin1(kDebugPrefixName[i]) + base);
+    m_cbDebugUnit->setCurrentIndex(keep < 0 ? 0 : keep);
+}
+
+void MainWindow::applyUnitLabels()
+{
+    const QString base = meterBaseUnit();
+    m_graph->setMeterLabel(QStringLiteral("Meter (") + base + QLatin1Char(')'));
+    m_graph->setDebugLabel(QStringLiteral("Debug (") + debugUnitName() + QLatin1Char(')'));
+    m_graph->setYUnit(base);
+
+    if (!m_running)
+        m_lblMeterValue->setText(QStringLiteral("현재 Meter 값 표시 (") + base + QLatin1Char(')'));
+}
+
+void MainWindow::onMeterUnitChanged(int)
+{
+    fillDebugUnitCombo();
+    applyUnitLabels();
+}
+
+void MainWindow::onDebugUnitChanged(int)
+{
+    applyUnitLabels();
 }
 
 // ================================================================= 시리얼 연결
@@ -757,11 +845,11 @@ void MainWindow::processDebugLine(const QString &line)
         return;
 
     m_hasDebugValue  = true;
-    m_lastDebugValue = v;                       // 파싱한 원래 값 (uA)
+    m_lastDebugValue = v;                       // 파싱한 원래 값 (선택한 Debug 단위)
 
     // 그래프에는 Meter 값과 같은 기준 단위로 환산해서 그린다.
     if (m_debugGraphOn && m_running && m_elapsed.isValid())
-        m_graph->addDebugPoint(m_elapsed.elapsed() / 1000.0, v * kDebugUnitScale);
+        m_graph->addDebugPoint(m_elapsed.elapsed() / 1000.0, v * debugUnitScale());
 }
 
 void MainWindow::processMeterLine(const QString &line)
@@ -817,8 +905,10 @@ void MainWindow::processMeterLine(const QString &line)
     QString csvText, csvUnit;
     UnitUtil::splitValue(value, kCsvDecimals, csvText, csvUnit);
 
+    const QString base = meterBaseUnit();
     m_lblMeterValue->setText(QStringLiteral("현재 Meter 값 : ") + dispText
-                             + (dispUnit.isEmpty() ? QString() : QLatin1Char(' ') + dispUnit));
+                             + QLatin1Char(' ') + dispUnit + base);
+    csvUnit += base;
 
     const double t = m_elapsed.isValid() ? (m_elapsed.elapsed() / 1000.0) : 0.0;
     m_graph->addMeterPoint(t, value);
@@ -890,7 +980,7 @@ bool MainWindow::openLogFiles()
     m_csvStream << QStringLiteral("시간,경과시간(s),"
                                   "Meter값(기본단위),Meter값(변환),단위,"
                                   "Debug값(%1),Debug값(기본단위),Debug값(변환),Debug단위\n")
-                   .arg(QString::fromLatin1(kDebugUnitName));
+                   .arg(debugUnitName());
     m_csvStream.flush();
 
     statusBar()->showMessage(QStringLiteral("저장 : %1 , %2")
@@ -911,14 +1001,14 @@ void MainWindow::writeCsvRow(const QDateTime &ts, double elapsed, double meterVa
     if (!m_csvFile.isOpen())
         return;
 
-    // Debug 값 : 원본(uA) / 기준 단위 환산값(A) / 단위 변환값 + 단위
+    // Debug 값 : 원본(선택 단위) / 기준 단위 환산값(A·V) / 단위 변환값 + 단위
     QString dbgRaw, dbgBase, dbgConv, dbgUnit;
     if (m_debugGraphOn && m_hasDebugValue) {         // 그래프 표시가 ON 일 때만 함께 저장
-        const double base = m_lastDebugValue * kDebugUnitScale;
+        const double base = m_lastDebugValue * debugUnitScale();
         dbgRaw  = csvNumber(m_lastDebugValue);
         dbgBase = csvNumber(base);
         UnitUtil::splitValue(base, kCsvDecimals, dbgConv, dbgUnit);
-        dbgUnit += QString::fromLatin1(kDebugBaseUnit);
+        dbgUnit += meterBaseUnit();
     }
 
     m_csvStream << ts.toString(QStringLiteral("yyyy-MM-dd HH:mm:ss.zzz")) << QLatin1Char(',')
@@ -986,6 +1076,8 @@ void MainWindow::startMeasure()
 
     setStartButtonState(1);
     m_spPeriod->setEnabled(false);
+    m_cbMeterUnit->setEnabled(false);   // 측정 중에는 단위 고정 (CSV 단위 일관성)
+    m_cbDebugUnit->setEnabled(false);
 
     appendDebugLog(QStringLiteral("[%1] ===== 측정 시작 =====").arg(timeStamp()));
 
@@ -1010,6 +1102,8 @@ void MainWindow::stopMeasure()
     closeLogFiles();
 
     m_spPeriod->setEnabled(true);
+    m_cbMeterUnit->setEnabled(true);
+    m_cbDebugUnit->setEnabled(true);
     setStartButtonState(2);     // "시작" / 노란색
 }
 

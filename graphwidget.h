@@ -27,6 +27,12 @@ public:
     // 범례에 표시할 이름 (예: "Debug (uA)")
     void setDebugLabel(const QString &label);
 
+    // 범례의 Meter 이름 (예: "Meter (A)")
+    void setMeterLabel(const QString &label);
+
+    // Y 축 눈금에 붙일 기본 단위 (예: "A", "V") -> "200 uA" 처럼 표시
+    void setYUnit(const QString &unit);
+
     void setWindowSeconds(double sec);
     void clearAll();
 
@@ -61,6 +67,8 @@ private:
     QVector<QPointF> m_debug;
 
     QString m_debugLabel  = QStringLiteral("Debug");
+    QString m_meterLabel  = QStringLiteral("Meter");
+    QString m_yUnit;
     bool   m_debugVisible = true;
     double m_windowSec    = 60.0;
     int    m_maxPoints    = 20000;
